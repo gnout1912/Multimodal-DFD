@@ -1,0 +1,29 @@
+# --- DATASET & PROCESSED FILES (IMPORTANT) ---
+data/raw/
+data/processed/
+data/metadata/*.csv
+# Ngoại trừ các file metadata mẫu nếu bạn muốn giữ
+!data/metadata/.gitkeep
+
+# --- PYTHON & OS ---
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+.DS_Store
+Thumbs.db
+
+# --- DEEP LEARNING MODELS ---
+# Không push các file trọng số (.pth, .pt, .bin) vì rất nặng
+*.pth
+*.pt
+*.bin
+*.ckpt
+experiments/checkpoint/
+
+# --- TOOLS & LOGS ---
+*.log
+folder_structure.txt
