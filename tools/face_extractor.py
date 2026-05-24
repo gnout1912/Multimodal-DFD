@@ -26,8 +26,13 @@ def extract_faces(video_path, output_dir, detector, max_frames=30):
     
     video_name = os.path.basename(video_path).split('.')[0]
     save_dir = join(output_dir, video_name)
-    os.makedirs(save_dir, exist_ok=True)
+    
+    # Nếu thư mục đã tồn tại và đủ ảnh, bỏ qua để tiết kiệm thời gian
+    if os.path.exists(save_dir) and len(os.listdir(save_dir)) >= max_frames:
+        reader.release()
+        return [join(save_dir, f) for f in os.listdir(save_dir)]
 
+    os.makedirs(save_dir, exist_ok=True)
     frame_num = 0
     saved_count = 0
     extracted_paths = []
@@ -48,12 +53,15 @@ def extract_faces(video_path, output_dir, detector, max_frames=30):
                 
                 # Resize 300x300 cho EfficientNet-B3
                 if size > 0:
-                    cropped_face = cv2.resize(cropped_face, (300, 300))
-                    file_name = f"frame_{saved_count:04d}.jpg"
-                    save_path = join(save_dir, file_name)
-                    cv2.imwrite(save_path, cropped_face)
-                    extracted_paths.append(save_path)
-                    saved_count += 1
+                    try:
+                        cropped_face = cv2.resize(cropped_face, (300, 300))
+                        file_name = f"frame_{saved_count:04d}.jpg"
+                        save_path = join(save_dir, file_name)
+                        cv2.imwrite(save_path, cropped_face)
+                        extracted_paths.append(save_path)
+                        saved_count += 1
+                    except Exception as e:
+                        print(f"Lỗi resize tại video {video_name}: {e}")
         
         frame_num += 1
     reader.release()
@@ -62,12 +70,18 @@ def extract_faces(video_path, output_dir, detector, max_frames=30):
 if __name__ == '__main__':
     RAW_DIR = r'D:\Projects\Multimodal-DFD\data\raw'
     PROCESSED_DIR = r'D:\Projects\Multimodal-DFD\data\processed\face_crops'
-    METADATA_DIR = r'D:\Projects\Multimodal-DFD  \data\metadata'
+    METADATA_DIR = r'D:\Projects\Multimodal-DFD\data\metadata'
+    CSV_PATH = join(METADATA_DIR, 'processed_faces_list.csv')
     
-    # Khởi tạo detector một lần duy nhất để tiết kiệm tài nguyên
     detector = dlib.get_frontal_face_detector()
     
-    all_record = []
+    # Đọc lại file CSV cũ nếu có để chạy tiếp (Resume)
+    if os.path.exists(CSV_PATH):
+        all_record = pd.read_csv(CSV_PATH).to_dict('records')
+        processed_ids = set([str(r['video_id']) for r in all_record])
+    else:
+        all_record = []
+        processed_ids = set()
 
     for category in ['original', 'Deepfakes']:
         label = 0 if category == 'original' else 1
@@ -77,21 +91,27 @@ if __name__ == '__main__':
         if not os.path.exists(input_folder): continue
         
         videos = [f for f in os.listdir(input_folder) if f.endswith('.mp4')]
-        print(f"--- Processing: {category} ---")
+        print(f"\n--- Processing: {category} ---")
         
         for video_name in tqdm(videos):
+            video_id = video_name.split('.')[0]
+            
+            # Kiểm tra nếu đã xử lý rồi thì bỏ qua
+            if video_id in processed_ids:
+                continue
+                
             v_path = join(input_folder, video_name)
             paths = extract_faces(v_path, output_folder, detector)
             
-            # Lưu lại thông tin vào danh sách để làm file metadata mới
             if paths:
                 all_record.append({
-                    'video_id': video_name.split('.')[0],
+                    'video_id': video_id,
                     'label': label,
                     'num_faces': len(paths)
                 })
+                
+                # Lưu CSV liên tục sau mỗi video để tránh mất dữ liệu khi crash
+                df = pd.DataFrame(all_record)
+                df.to_csv(CSV_PATH, index=False)
 
-    # Xuất ra file CSV để sau này nạp vào mô hình dễ dàng
-    df = pd.DataFrame(all_record)
-    df.to_csv(join(METADATA_DIR, 'processed_faces_list.csv'), index=False)
-    print("Xử lý xong! Metadata đã lưu tại data/metadata/processed_faces_list.csv")
+    print(f"\n Hoàn thành! Metadata lưu tại: {CSV_PATH}")

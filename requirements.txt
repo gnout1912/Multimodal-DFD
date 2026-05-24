@@ -1,0 +1,24 @@
+# --- Hạ tầng tính toán cốt lõi (Cuda cho RTX 3050) ---
+torch>=2.0.0
+torchvision>=0.15.0
+
+# --- Xử lý Hình ảnh và Trích xuất khuôn mặt ---
+opencv-python>=4.7.0
+dlib>=19.24.0
+Pillow>=9.5.0
+
+# --- Xử lý mảng dữ liệu và Bảng biểu chỉ mục ---
+numpy>=1.24.0
+pandas>=2.0.0
+
+# --- Xử lý Tín hiệu âm thanh thô ---
+librosa>=0.10.0
+soundfile>=0.12.1
+
+# --- Kiến trúc mạng học sâu (EfficientNet & Wav2Vec2) ---
+timm>=0.9.2
+transformers>=4.30.0
+
+# --- Đánh giá thuật toán và Tiện ích hệ thống ---
+scikit-learn>=1.2.0
+tqdm>=4.65.0
