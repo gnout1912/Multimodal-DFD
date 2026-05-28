@@ -43,7 +43,7 @@ class DualStreamFusionModel(nn.Module):
         self.classifier = nn.Sequential(
             nn.Linear(512 * 30, 1024), # Phẳng hóa (Flatten) 30 frames x 512 đặc trưng
             nn.ReLU(),
-            nn.Dropout(0.5),
+            nn.Dropout(0.6),
             nn.Linear(1024, 2) # Đầu ra là 2 lớp: 0 (Real) và 1 (Fake)
         )
 

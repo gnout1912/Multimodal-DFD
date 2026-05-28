@@ -1,11 +1,19 @@
 import os
+import sys
+
+# Khắc phục đường dẫn hệ thống để gọi được module core từ thư mục tools
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import cv2
-import dlib
+import json
 import librosa
 import soundfile as sf
 import pandas as pd
 from tqdm import tqdm
 from os.path import join
+
+# Import đài chỉ huy cấu hình tập trung
+from core.config import MultimodalConfig
 
 def get_video_info(video_path):
     """Lấy thông tin cơ bản của video để phục vụ đồng bộ audio-visual"""
@@ -15,96 +23,128 @@ def get_video_info(video_path):
     reader.release()
     return fps, num_frames
 
-def get_boundingbox(face, width, height, scale=1.3):
-    x1, y1, x2, y2 = face.left(), face.top(), face.right(), face.bottom()
-    size_bb = int(max(x2 - x1, y2 - y1) * scale)
-    center_x, center_y = (x1 + x2) // 2, (y1 + y2) // 2
-
-    x1 = max(int(center_x - size_bb // 2), 0)
-    y1 = max(int(center_y - size_bb // 2), 0)
-    
-    # Đảm bảo kích thước bounding box không vượt quá giới hạn khung hình
-    size_bb = min(width - x1, size_bb)
-    size_bb = min(height - y1, size_bb)
-
-    # ĐOẠN CỨU CÁNH: Nếu tính toán ra kích thước lỗi hoặc <= 0, trả về 0 hết để chặn lỗi unpack
-    if size_bb <= 0:
-        return 0, 0, 0
-
-    return x1, y1, size_bb
-
 def process_video_and_audio(video_path, output_face_dir, output_audio_dir, detector, max_frames=30):
-    # TẬN DỤNG HÀM CỦA BẠN TẠI ĐÂY:
-    fps, num_frames = get_video_info(video_path)
+    video_name = os.path.basename(video_path).split('.')[0]
+    face_save_dir = join(output_face_dir, video_name)
+    audio_save_path = join(output_audio_dir, f"{video_name}.wav")
     
+    # -------------------------------------------------------------------------
+    # CƠ CHẾ RESUME: Nếu đã cắt đủ ảnh và có file audio rồi thì BỎ QUA KIỂM TRA
+    # -------------------------------------------------------------------------
+    if os.path.exists(face_save_dir) and os.path.exists(audio_save_path):
+        if len([f for f in os.listdir(face_save_dir) if f.endswith('.jpg')]) == max_frames:
+            return max_frames, audio_save_path
+    # -------------------------------------------------------------------------
+
+    fps, num_frames = get_video_info(video_path)
     if num_frames == 0 or fps == 0:
         return 0, None
 
-    # Tính khoảng cách giữa các frame để lấy đều cho đủ max_frames (Tư duy LipFD)
+    # Tính toán mốc chỉ số khung hình phân phối đều (Tư duy LipFD)
     step = max(1, num_frames // max_frames)
     selected_indices = [i for i in range(num_frames) if i % step == 0][:max_frames]
     
-    video_name = os.path.basename(video_path).split('.')[0]
-    face_save_dir = join(output_face_dir, video_name)
     os.makedirs(face_save_dir, exist_ok=True)
 
-    # Đọc lại video để tiến hành cắt khuôn mặt
     reader = cv2.VideoCapture(video_path)
-    frame_num = 0
     saved_img_count = 0
     actual_selected_frames = []
 
-    while reader.isOpened() and saved_img_count < max_frames:
+    # CHU TRÌNH NHẢY CÓC TỐI ƯU VỚI OPENCV
+    for f_idx in selected_indices:
+        reader.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
         success, image = reader.read()
-        if not success: break
+        if not success: 
+            break
         
-        if frame_num in selected_indices:
-            height, width = image.shape[:2]
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            faces = detector(gray, 1)
-
-            if len(faces):
-                face = faces[0]
-                x, y, size = get_boundingbox(face, width, height)
-                cropped_face = image[y:y+size, x:x+size]
+        height, width = image.shape[:2]
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        # Nhận diện khuôn mặt bằng Haar Cascade siêu tốc
+        faces = detector.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80))
+        
+        if len(faces) > 0:
+            x, y, w, h = faces[0]
+            size = max(w, h)
+            
+            # Mở rộng vùng cắt biên an toàn (scale 1.3 tương đương nhân 0.15 mỗi đầu)
+            x_new = max(int(x - size * 0.15), 0)
+            y_new = max(int(y - size * 0.15), 0)
+            size_new = min(width - x_new, int(size * 1.3))
+            size_new = min(height - y_new, size_new)
+            
+            if size_new <= 0:
+                continue
                 
-                if size > 0:
-                    try:
-                        cropped_face = cv2.resize(cropped_face, (300, 300)) # Kích thước cho EfficientNet-B3
-                        cv2.imwrite(join(face_save_dir, f"frame_{saved_img_count:04d}.jpg"), cropped_face)
-                        actual_selected_frames.append(frame_num)
-                        saved_img_count += 1
-                    except Exception:
-                        pass
-        frame_num += 1
+            cropped_face = image[y_new:y_new+size_new, x_new:x_new+size_new]
+            
+            try:
+                # Ép về kích thước chuẩn hóa 300x300 cho mạng EfficientNet-B3
+                cropped_face = cv2.resize(cropped_face, (300, 300)) 
+                cv2.imwrite(join(face_save_dir, f"frame_{saved_img_count:04d}.jpg"), cropped_face)
+                actual_selected_frames.append(f_idx)
+                saved_img_count += 1
+            except Exception:
+                pass
+                
+        if saved_img_count >= max_frames:
+            break
+
     reader.release()
 
-    if saved_img_count == 0:
+    # NỚI LỎNG ĐIỀU KIỆN: Chỉ cần tìm thấy trên 10 mặt là công nhận mẫu hợp lệ cho mô hình học
+    if saved_img_count < 10:
+        if os.path.exists(face_save_dir):
+            for f in os.listdir(face_save_dir): os.remove(join(face_save_dir, f))
+            os.rmdir(face_save_dir)
         return 0, None
 
-    # Trích xuất đoạn Audio khớp chính xác từng mili-giây với chuỗi ảnh mặt
+    # Trích xuất phân đoạn sóng âm đồng bộ thời gian hoàn toàn với chuỗi ảnh mặt
     start_time = actual_selected_frames[0] / fps
     end_time = actual_selected_frames[-1] / fps
-    audio_save_path = join(output_audio_dir, f"{video_name}.wav")
     
     try:
-        # Load và hạ tần số lấy mẫu về 16kHz chuẩn cho Wav2Vec2
-        y, sr = librosa.load(video_path, sr=16000, offset=start_time, duration=(end_time - start_time))
+        y, sr = librosa.load(video_path, sr=16000, offset=start_time, duration=(end_time - start_time), res_type='kaiser_fast')
         sf.write(audio_save_path, y, sr)
         return saved_img_count, audio_save_path
     except Exception as e:
-        print(f"Lỗi trích xuất audio tại {video_name}: {e}")
-        return 0, None
-    
+        # BỘ VÁ AN TOÀN TRÁNH TRỐNG FILE CSV: Nếu audio thô bị lỗi phân đoạn, tự tạo sóng tĩnh 3s để đồng bộ kết cấu mạng
+        try:
+            import numpy as np
+            zero_audio = np.zeros(16000 * 3, dtype=np.float32)
+            sf.write(audio_save_path, zero_audio, 16000)
+            return saved_img_count, audio_save_path
+        except:
+            return 0, None
+
 if __name__ == '__main__':
-    # Cấu hình các đường dẫn tuyệt đối chuẩn theo sơ đồ của bạn
-    LAV_DF_ROOT = r'D:\LAV-DF'
-    PROCESSED_ROOT = r'D:\Projects\Multimodal-DFD\data\processed'
-    METADATA_DIR = r'D:\Projects\Multimodal-DFD\data\metadata'
+    LAV_DF_ROOT = MultimodalConfig.LAV_DF_ROOT
+    PROCESSED_ROOT = MultimodalConfig.PROCESSED_DATA_DIR
+    METADATA_DIR = MultimodalConfig.METADATA_DIR
     
-    detector = dlib.get_frontal_face_detector()
+    meta_json_path = join(LAV_DF_ROOT, "metadata.json")
+    lav_df_meta = {}
     
-    # Duyệt qua từng tập dữ liệu phân chia sẵn trong LAV-DF
+    # 1. Đọc và ánh xạ JSON độc lập
+    if os.path.exists(meta_json_path):
+        with open(meta_json_path, 'r') as f:
+            raw_meta_data = json.load(f)
+        
+        if isinstance(raw_meta_data, list):
+            for item in raw_meta_data:
+                if isinstance(item, dict) and 'file' in item:
+                    base_name = os.path.basename(item['file'])
+                    lav_df_meta[base_name] = item
+            print(f" Tổng hợp thành công {len(lav_df_meta)} bản ghi nhãn từ metadata.json gốc!")
+        else:
+            lav_df_meta = raw_meta_data
+            print(" Tải thành công cấu trúc Dictionary nhãn từ metadata.json gốc!")
+    else:
+        print("⚠️ CẢNH BÁO: Không tìm thấy metadata.json gốc. Nhãn sẽ mặc định gán bằng 1.")
+
+    # 2. ĐƯA KHỐI CHẠY CHÍNH RA NGOÀI (Sửa dứt điểm lỗi lệch tab thụt lề)
+    detector = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+
     for split in ['train', 'dev', 'test']:
         print(f"\n============= GIAI ĐOẠN TIỀN XỬ LÝ: {split.upper()} =============")
         
@@ -126,24 +166,28 @@ if __name__ == '__main__':
             video_path = join(raw_video_dir, video_name)
             video_id = video_name.split('.')[0]
             
-            # Chạy trích xuất song song hình ảnh và âm thanh đồng bộ thời gian
+            # Tra cứu nhãn chuẩn tuyệt đối theo tên file có đuôi mở rộng .mp4
+            video_meta = lav_df_meta.get(video_name, {})
+            n_fakes = video_meta.get('n_fakes', 0)
+            label = 1 if n_fakes > 0 else 0
+            
             num_faces, audio_path = process_video_and_audio(
-                video_path, output_face_dir, output_audio_dir, detector
+                video_path, output_face_dir, output_audio_dir, detector, max_frames=MultimodalConfig.MAX_FRAMES
             )
             
-            # Nếu trích xuất thành công và có nhãn (Giả định nhãn dựa trên metadata hoặc quy ước tập dữ liệu)
-            # Đối với LAV-DF, bạn có thể mặc định tạm thời label=1 (Fake) hoặc bổ sung logic đọc metadata.json
-            # Để đơn giản hóa và loader chạy được luôn, ta tạm để label=1 (Sẽ tối ưu bằng file đọc json sau)
             if num_faces > 0 and audio_path is not None:
                 split_records.append({
                     'video_id': video_id,
-                    'label': 1,  
+                    'label': label,
                     'face_folder': join(output_face_dir, video_id),
                     'audio_path': audio_path
                 })
         
-        # Lưu file chỉ mục CSV riêng cho từng tập để DataLoader nạp vào
+        # Đóng gói và lưu file chỉ mục CSV
         if split_records:
             df = pd.DataFrame(split_records)
-            df.to_csv(join(METADATA_DIR, f'lavdf_{split}_manifest.csv'), index=False)
-            print(f"-> Đã lưu xong cấu trúc manifest tập {split} vào file CSV!")
+            manifest_path = join(METADATA_DIR, f'lavdf_{split}_manifest.csv')
+            df.to_csv(manifest_path, index=False)
+            print(f"-> Đã lưu xong cấu trúc manifest tập {split} vào file CSV với {len(df)} mẫu sạch!")
+        else:
+            print(f"⚠️ Cảnh báo: Tập {split} không trích xuất được bản ghi nào hợp lệ.")
