@@ -13,17 +13,20 @@ from core.dataset.data_loader import get_multimodal_loaders
 from core.models.multimodal_model import MultimodalDeepfakeDetector
 
 
-def contrastive_loss(v_embeds, a_embeds, labels, temperature=0.2):
-    """Contrastive loss an toàn hơn"""
+def contrastive_loss(v_embeds, a_embeds, labels):
+    # Chuẩn hóa ma trận vector L2 chống tràn số thực
     v_norm = torch.nn.functional.normalize(v_embeds, dim=-1, eps=1e-8)
     a_norm = torch.nn.functional.normalize(a_embeds, dim=-1, eps=1e-8)
     
+    # Tính Cosine Similarity chuẩn trong biên [-1, 1]
     sim = torch.sum(v_norm * a_norm, dim=-1)
-    sim = torch.clamp(sim, min=-0.99, max=0.99) / temperature
+    sim = torch.clamp(sim, min=-0.99, max=0.99)
     
+    # Ép logic mục tiêu tối ưu: Real (0) -> Đích 1 (Đồng bộ), Fake (1) -> Đích 0 (Đẩy xa)
     target = 1.0 - labels.float()
-    loss = nn.functional.binary_cross_entropy_with_logits(sim, target)
-    return loss
+    
+    # Tính toán BCE Loss bọc Sigmoid ổn định đồ thị đạo hàm tối đa
+    return nn.get_submodule if hasattr(nn, 'get_submodule') else nn.functional.binary_cross_entropy_with_logits(sim, target)
 
 
 def train_epoch(model, loader, bce_criterion, optimizer, device):
@@ -38,20 +41,17 @@ def train_epoch(model, loader, bce_criterion, optimizer, device):
         labels = labels.to(device).float().view(-1)
         
         optimizer.zero_grad()
-        
         logits, v_emb, a_emb = model(video, audio)
         
-        # Bảo vệ mạnh
         logits = torch.nan_to_num(logits, nan=0.0)
         logits = torch.clamp(logits, min=-10.0, max=10.0)
         
         loss_bce = bce_criterion(logits, labels)
         loss_con = contrastive_loss(v_emb, a_emb, labels)
         
-        loss = loss_bce + 0.1 * loss_con   # Giảm mạnh contrastive
+        loss = loss_bce + 0.0362 * loss_con
         
         if torch.isnan(loss) or torch.isinf(loss):
-            print(f"⚠️ Batch {batch_idx} NaN detected - skipping")
             optimizer.zero_grad()
             continue
             
@@ -63,6 +63,10 @@ def train_epoch(model, loader, bce_criterion, optimizer, device):
         preds = (torch.sigmoid(logits) >= 0.5).float()
         correct += (preds == labels).sum().item()
         total += labels.size(0)
+        
+        if batch_idx % 25 == 0:
+            print(f"   Batch {batch_idx:3d} | BCE: {loss_bce.item():.4f} | Con: {loss_con.item():.4f} | "
+                  f"Logits: {logits.mean().item():.4f} | Pred: {preds.mean().item():.3f}")
     
     avg_loss = total_loss / total if total > 0 else 0.0
     avg_acc = correct / total if total > 0 else 0.0
@@ -86,7 +90,7 @@ def validate(model, loader, bce_criterion, device):
             
             loss_bce = bce_criterion(logits, labels)
             loss_con = contrastive_loss(v_emb, a_emb, labels)
-            loss = loss_bce + 0.25 * loss_con
+            loss = loss_bce + 0.0362 * loss_con
             
             if torch.isnan(loss) or torch.isinf(loss):
                 continue
@@ -109,20 +113,30 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"-> Đang sử dụng thiết bị: {device}")
     
-    # Load data
     train_loader, dev_loader, _ = get_multimodal_loaders(config)
     
     model = MultimodalDeepfakeDetector().to(device)
     
-    bce_criterion = nn.BCEWithLogitsLoss()
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = optim.AdamW(trainable_params, lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
+    # ==================== RESUME ====================
+    best_path = os.path.join(config.WEIGHTS_DIR, "best_multimodal_model.pth")
+    if os.path.exists(best_path):
+        print(f"🔄 Đang load best model để tiếp tục train...")
+        model.load_state_dict(torch.load(best_path, map_location=device))
+        print("✅ Load best model thành công!")
+    else:
+        print("⚠️ Không tìm thấy best model → Train từ đầu.")
+    # ===============================================
     
-    # Scheduler - SỬA LỖI verbose
-    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
+    bce_criterion = nn.BCEWithLogitsLoss()
+    optimizer = optim.AdamW([p for p in model.parameters() if p.requires_grad],
+                           lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
+    
+    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
     
     best_dev_acc = 0.0
-    
+    patience = 20                    # ← TĂNG CAO ĐỂ ÍT DỪNG
+    patience_counter = 0
+
     for epoch in range(1, config.EPOCHS + 1):
         print(f"\n🚀 Epoch [{epoch}/{config.EPOCHS}]")
         
@@ -133,14 +147,19 @@ def main():
         print(f"   Train Loss: {train_loss:.4f} | Train Acc: {train_acc*100:.2f}%")
         print(f"   Dev Loss:   {dev_loss:.4f} | Dev Acc:   {dev_acc*100:.2f}%")
         
-        # Scheduler step
         scheduler.step(dev_acc)
         
         if dev_acc > best_dev_acc:
             best_dev_acc = dev_acc
-            checkpoint_path = os.path.join(config.WEIGHTS_DIR, "best_multimodal_model.pth")
-            torch.save(model.state_dict(), checkpoint_path)
-            print(f"   💾 Lưu best model tại: {checkpoint_path}")
+            patience_counter = 0
+            torch.save(model.state_dict(), best_path)
+            print(f"   💾 Lưu best model! (Dev Acc = {dev_acc*100:.2f}%)")
+        else:
+            patience_counter += 1
+            print(f"   Patience: {patience_counter}/{patience}")
+            if patience_counter >= patience:
+                print(f"⛔ Early Stopping tại epoch {epoch}!")
+                break
 
 
 if __name__ == "__main__":

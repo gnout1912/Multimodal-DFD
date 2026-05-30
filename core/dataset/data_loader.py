@@ -13,24 +13,37 @@ class MultimodalDataset(Dataset):
         self.config = config
         self.is_train = is_train
         
-        # ==================== THÊM TRANSFORM ====================
-        self.video_transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                               std=[0.229, 0.224, 0.225]),
-        ])
-        # ======================================================
-        
+        # ==================== DATA AUGMENTATION NHẸ ====================
+        if self.is_train:
+            self.video_transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomRotation(degrees=5),
+                transforms.ColorJitter(brightness=0.08, contrast=0.08, saturation=0.05, hue=0.03),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                                   std=[0.229, 0.224, 0.225]),
+            ])
+        else:
+            self.video_transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                                   std=[0.229, 0.224, 0.225]),
+            ])
+        # ========================================================
+
         if not os.path.exists(manifest_path):
             raise FileNotFoundError(f"Không tìm thấy file manifest tại: {manifest_path}")
             
         full_df = pd.read_csv(manifest_path)
         
-        # Lấy subset để train nhanh trên Colab
+        # ==================== DÙNG 400 VIDEO (SUBSET) ====================
         if self.is_train:
             self.df = full_df.sample(n=min(400, len(full_df)), random_state=42).reset_index(drop=True)
         else:
             self.df = full_df.sample(n=min(100, len(full_df)), random_state=42).reset_index(drop=True)
+        # ============================================================
+        
+        print(f"📊 SUBSET - {len(self.df)} samples ({'Train' if self.is_train else 'Dev/Test'})")
 
     def __len__(self):
         return len(self.df)
@@ -89,12 +102,10 @@ class MultimodalDataset(Dataset):
         video_tensor = self._load_video_frames(row['face_folder'])
         audio_tensor = self._load_audio(row['audio_path'])
         label = torch.tensor(int(row['label']), dtype=torch.float32)
-        
         return video_tensor, audio_tensor, label
 
 
 def get_multimodal_loaders(config):
-    """Trả về cả 3 loader: train, dev, test"""
     train_dataset = MultimodalDataset(config.TRAIN_MANIFEST, config, is_train=True)
     dev_dataset = MultimodalDataset(config.DEV_MANIFEST, config, is_train=False)
     test_dataset = MultimodalDataset(config.TEST_MANIFEST, config, is_train=False)
