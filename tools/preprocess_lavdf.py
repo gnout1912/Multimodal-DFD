@@ -93,7 +93,7 @@ def process_video_and_audio(video_path, output_face_dir, output_audio_dir, detec
     reader.release()
 
     # NỚI LỎNG ĐIỀU KIỆN: Chỉ cần tìm thấy trên 10 mặt là công nhận mẫu hợp lệ cho mô hình học
-    if saved_img_count < 10:
+    if saved_img_count < int(max_frames * 0.7):
         if os.path.exists(face_save_dir):
             for f in os.listdir(face_save_dir): os.remove(join(face_save_dir, f))
             os.rmdir(face_save_dir)
@@ -111,9 +111,7 @@ def process_video_and_audio(video_path, output_face_dir, output_audio_dir, detec
         # BỘ VÁ AN TOÀN TRÁNH TRỐNG FILE CSV: Nếu audio thô bị lỗi phân đoạn, tự tạo sóng tĩnh 3s để đồng bộ kết cấu mạng
         try:
             import numpy as np
-            zero_audio = np.zeros(16000 * 3, dtype=np.float32)
-            sf.write(audio_save_path, zero_audio, 16000)
-            return saved_img_count, audio_save_path
+            return 0, None
         except:
             return 0, None
 

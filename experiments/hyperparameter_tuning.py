@@ -1,178 +1,454 @@
-import sys
 import os
+import sys
+import re
+import gc
+import json
+import subprocess
+import warnings
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import pandas as pd
 import optuna
-from optuna.samplers import TPESampler
+import matplotlib.pyplot as plt
 from tqdm import tqdm
-import time
 
-# Khắc phục đường dẫn hệ thống để gọi được các file trong thư mục core Windows
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from core.config import MultimodalConfig
-from core.dataset.data_loader import get_multimodal_loaders
+from core.dataset.data_loader import MultimodalDataset
 from core.models.multimodal_model import MultimodalDeepfakeDetector
 
-# =========================================================================
-# HÀM LOSS TƯƠNG PHẢN ĐÃ VÁ LỖI TOÁN HỌC CHỐNG NAN TUYỆT ĐỐI
-# =========================================================================
-def contrastive_loss(v_embeds, a_embeds, labels):
-    # Chuẩn hóa ma trận vector L2 chống chia cho số 0
-    v_norm = torch.nn.functional.normalize(v_embeds, dim=-1, eps=1e-8)
-    a_norm = torch.nn.functional.normalize(a_embeds, dim=-1, eps=1e-8)
-    
-    # Tính Cosine Similarity chuẩn trong biên an toàn [-1, 1]
-    sim = torch.sum(v_norm * a_norm, dim=-1)
-    sim = torch.clamp(sim, min=-0.99, max=0.99)
-    
-    # Logic mục tiêu tối ưu: Real (0) -> Đích 1 (Kéo gần), Fake (1) -> Đích 0 (Đẩy xa)
-    target = 1.0 - labels.float()
-    
-    # Tính toán BCE Loss bọc Sigmoid ổn định đồ thị đạo hàm tối đa
-    return torch.nn.functional.binary_cross_entropy_with_logits(sim, target)
+# Import đúng file train FakeAVCeleb
+from experiments.train import (
+    av_contrastive_loss,
+    validate
+)
 
-# =========================================================================
-# HÀM MỤC TIÊU (OBJECTIVE FUNCTION) CHO OPTUNA CHẠY TỪNG TRIAL
-# =========================================================================
-def objective(trial):
-    # Định nghĩa vùng không gian tìm kiếm tham số an toàn cho GPU Laptop
-    lr = trial.suggest_float('lr', 1e-5, 1.5e-4, log=True)
-    weight_decay = trial.suggest_float('weight_decay', 1e-5, 3e-4, log=True)
-    
-    # GIỚI HẠN CHUẨN: Chỉ cho phép chọn Batch Size 4 hoặc 6 theo đúng yêu cầu của bạn
-    batch_size = trial.suggest_categorical('batch_size', [4, 6]) 
-    contrastive_weight = trial.suggest_float('contrastive_weight', 0.01, 0.1)
-    
-    print(f"\n{'='*90}")
-    print(f"🔍 ĐANG CHẠY TRIAL {trial.number + 1}")
-    print(f"   🔹 Learning Rate    : {lr:.2e}")
-    print(f"   🔹 Weight Decay     : {weight_decay:.2e}")
-    print(f"   🔹 Batch Size       : {batch_size}")
-    print(f"   🔹 Contrastive W    : {contrastive_weight:.3f}")
-    print(f"{'='*90}")
-    
-    # Nạp cấu hình toàn cục
-    config = MultimodalConfig()
-    config.LEARNING_RATE = lr
-    config.WEIGHT_DECAY = weight_decay
-    config.BATCH_SIZE = batch_size
-    config.NUM_WORKERS = 0 # Ép bằng 0 trên Windows để chống lỗi đóng băng đa luồng ngầm
-    
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    torch.cuda.empty_cache() # Xả sạch bộ nhớ đệm trước khi khởi chạy
-    
-    # Gọi bộ nạp dữ liệu Subset local
-    train_loader, dev_loader, _ = get_multimodal_loaders(config)
-    
-    # Khởi tạo mô hình mạng lai mới đã sửa Classifier phẳng hóa thời gian 30 frames
-    model = MultimodalDeepfakeDetector().to(device)
-    
-    bce_criterion = nn.BCEWithLogitsLoss()
-    optimizer = optim.AdamW([p for p in model.parameters() if p.requires_grad], 
-                            lr=lr, weight_decay=weight_decay)
-    
-    start_time = time.time()
-    
-    # Huấn luyện nhanh 3 Epoch cho mỗi Trial để đánh giá tốc độ hội tụ của bộ siêu tham số
-    for epoch in range(3):
-        model.train()
-        epoch_loss = 0.0
-        
-        pbar = tqdm(train_loader, desc=f"   Epoch {epoch+1}/3", leave=False)
-        for video, audio, labels in pbar:
-            video = video.to(device)
-            audio = audio.to(device)
-            # Ép dẹt nhãn tuyệt đối về dạng ma trận cột cố định 2D để triệt tiêu lỗi sập chiều batch cuối
-            labels = labels.to(device).float().view(-1, 1)
-            
-            optimizer.zero_grad()
+
+def balanced_sample(df, n_per_class, seed=42):
+    if "label" not in df.columns:
+        raise ValueError("Manifest thiếu cột label.")
+
+    real_df = df[df["label"] == 0]
+    fake_df = df[df["label"] == 1]
+
+    real_n = min(n_per_class, len(real_df))
+    fake_n = min(n_per_class, len(fake_df))
+
+    if real_n == 0 or fake_n == 0:
+        raise ValueError(
+            f"Dataset thiếu class. Real={len(real_df)}, Fake={len(fake_df)}"
+        )
+
+    sampled = pd.concat([
+        real_df.sample(real_n, random_state=seed),
+        fake_df.sample(fake_n, random_state=seed),
+    ])
+
+    sampled = sampled.sample(frac=1, random_state=seed).reset_index(drop=True)
+    return sampled
+
+
+def train_epoch_tuning(
+    model,
+    loader,
+    bce_criterion,
+    optimizer,
+    device,
+    accumulation_steps,
+    trial_num,
+    epoch,
+    contrastive_weight,
+    grad_clip_norm
+):
+    model.train()
+    optimizer.zero_grad(set_to_none=True)
+
+    progress_bar = tqdm(loader, desc=f"Trial {trial_num} | Epoch {epoch}")
+
+    for batch_idx, (video, audio, labels) in enumerate(progress_bar):
+        video = video.to(device, non_blocking=True)
+        audio = audio.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True).float().view(-1)
+
+        with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
             logits, v_emb, a_emb = model(video, audio)
-            
-            # Ép logits về ma trận cột 2D [Batch_size, 1] ăn khớp hoàn hảo với nhãn đích
-            logits = logits.view(-1, 1)
-            
-            loss_bce = bce_criterion(logits, labels)
-            loss_con = contrastive_loss(v_emb, a_emb, labels.view(-1))
-            
-            # Tính toán Loss tổng hợp kép với trọng số tối ưu của từng trial
-            loss = loss_bce + contrastive_weight * loss_con
-            
-            if torch.isnan(loss) or torch.isinf(loss):
-                optimizer.zero_grad()
-                continue
-                
-            loss.backward()
-            # Gradient Clipping bảo vệ chống nổ số thực phát sinh nan ngầm
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            
-            epoch_loss += loss.item()
-            pbar.set_postfix({'loss': f'{loss.item():.4f}'})
-            
-        # Giải phóng bộ nhớ đệm GPU cuối mỗi Epoch để bảo vệ tài nguyên
-        torch.cuda.empty_cache()
-    
-    # Tiến hành kiểm định mô hình (Validation) sau 3 Epoch
-    model.eval()
-    correct = 0
-    total = 0
-    
-    with torch.no_grad():
-        for video, audio, labels in dev_loader:
-            video = video.to(device)
-            audio = audio.to(device)
-            labels = labels.to(device).float().view(-1, 1)
-            
-            logits, _, _ = model(video, audio)
-            logits = logits.view(-1, 1)
-            
-            # Tính chỉ số chính xác qua hàm kích hoạt Sigmoid nhị phân ma trận cột
-            preds = (torch.sigmoid(logits) >= 0.5).float()
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
-            
-    acc = correct / total if total > 0 else 0.0
-    total_time = (time.time() - start_time) / 60
-    
-    print(f"   ➔ [KẾT QUẢ TRIAL] Dev Accuracy: {acc*100:.2f}% | Thời gian cày: {total_time:.1f} phút")
-    print(f"{'='*90}\n")
-    
-    # Dọn dẹp RAM/VRAM chuẩn bị bàn giao cho Trial tiếp theo
-    del model, optimizer, train_loader, dev_loader
-    torch.cuda.empty_cache()
-    
-    return acc
 
-# =========================================================================
-# TIẾN TRÌNH KHỞI CHẠY CHÍNH THỨC
-# =========================================================================
-if __name__ == "__main__":
-    print("🚀 BẮT ĐẦU CHẠY SIÊU TỰ ĐỘNG TUNING THAM SỐ OPTUNA PHIÊN BẢN BỌC GIÁP AN TOÀN")
-    print("Mục tiêu: Quét sạch lỗi, tối ưu Cross-Attention bứt phá Accuracy > 90%\n")
-    
-    # ĐÃ SỬA CHÍ MẠNG: Thiết lập lưu trữ SQLite cục bộ để ghi nhớ tiến độ vĩnh viễn
-    db_path = "sqlite:///optuna_study.db"
-    
-    study = optuna.create_study(
-        study_name="multimodal_dfd_tuning", 
-        direction='maximize', 
-        sampler=TPESampler(seed=42),
-        storage=db_path,
-        load_if_exists=True # Nếu phát hiện file .db cũ sẽ tự động bốc đầu cày tiếp tục luôn!
+            logits = torch.nan_to_num(
+                logits,
+                nan=0.0,
+                posinf=10.0,
+                neginf=-10.0
+            )
+            logits = torch.clamp(logits, min=-10.0, max=10.0)
+
+            loss_bce = bce_criterion(logits, labels)
+            loss_con = av_contrastive_loss(v_emb, a_emb, labels)
+
+            loss = loss_bce + contrastive_weight * loss_con
+            scaled_loss = loss / accumulation_steps
+
+        if torch.isnan(scaled_loss) or torch.isinf(scaled_loss):
+            optimizer.zero_grad(set_to_none=True)
+            continue
+
+        scaled_loss.backward()
+
+        if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(loader):
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                max_norm=grad_clip_norm
+            )
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+
+        progress_bar.set_postfix(loss=f"{loss.item():.4f}")
+
+
+def objective(trial):
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    config = MultimodalConfig()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Tuning nhẹ để phù hợp RTX 3050
+    config.IMAGE_SIZE = 224
+    config.MAX_FRAMES = 12
+
+    target_batch = trial.suggest_int("batch_size", 2, 4)
+    lr = trial.suggest_float("learning_rate", 5e-6, 5e-5, log=True)
+    weight_decay = trial.suggest_float("weight_decay", 1e-5, 5e-4, log=True)
+    contrastive_weight = trial.suggest_float("contrastive_weight", 0.03, 0.10)
+
+    physical_batch = 1
+    accumulation_steps = max(1, target_batch // physical_batch)
+
+    temp_train_path = os.path.join(
+        config.METADATA_DIR,
+        "temp_fakeavceleb_tuning_train.csv"
     )
-    
-    # Thêm cờ catch phòng ngừa: Nếu dính Trial nào bị tràn VRAM khi chọn batch=6, Optuna tự bỏ qua và tiếp tục vĩnh viễn không sập nguồn!
-    study.optimize(objective, n_trials=10, catch=(torch.OutOfMemoryError, Exception)) 
-    
-    print("\n" + "="*90)
-    print("🎉 HOÀN THÀNH QUÁ TRÌNH KHẢO SÁT THAM SỐ TỐI ƯU!")
-    print(f" 🏆 Độ chính xác Dev tốt nhất tìm được: {study.best_value*100:.2f}%")
-    print(" 🏆 Bộ siêu tham số lý tưởng nhất dành cho mô hình:")
-    for key, value in study.best_params.items():
-        if isinstance(value, float):
-            print(f"   🔹 {key:18}: {value:.2e}" if 'lr' in key or 'decay' in key else f"   🔹 {key:18}: {value:.4f}")
-        else:
-            print(f"   🔹 {key:18}: {value}")
-    print("="*90)
+    temp_dev_path = os.path.join(
+        config.METADATA_DIR,
+        "temp_fakeavceleb_tuning_dev.csv"
+    )
+
+    train_dataset = MultimodalDataset(temp_train_path, config, is_train=True)
+    dev_dataset = MultimodalDataset(temp_dev_path, config, is_train=False)
+
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=physical_batch,
+        shuffle=True,
+        num_workers=0,
+        pin_memory=True,
+        drop_last=True
+    )
+
+    dev_loader = torch.utils.data.DataLoader(
+        dev_dataset,
+        batch_size=physical_batch,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=True
+    )
+
+    model = MultimodalDeepfakeDetector().to(device)
+
+    bce_criterion = nn.BCEWithLogitsLoss()
+
+    optimizer = optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=lr,
+        weight_decay=weight_decay
+    )
+
+    best_auc_for_trial = 0.0
+
+    for epoch in range(1, 4):
+        train_epoch_tuning(
+            model=model,
+            loader=train_loader,
+            bce_criterion=bce_criterion,
+            optimizer=optimizer,
+            device=device,
+            accumulation_steps=accumulation_steps,
+            trial_num=trial.number,
+            epoch=epoch,
+            contrastive_weight=contrastive_weight,
+            grad_clip_norm=config.GRAD_CLIP_NORM
+        )
+
+        dev_loss, dev_acc, dev_auc, dev_f1, best_t = validate(
+            model=model,
+            loader=dev_loader,
+            bce_criterion=bce_criterion,
+            device=device,
+            config=config
+        )
+
+        print(
+            f"\n[Trial {trial.number} | Epoch {epoch}] "
+            f"Dev Loss={dev_loss:.4f} | "
+            f"Dev Acc={dev_acc*100:.2f}% | "
+            f"Dev AUC={dev_auc*100:.2f}% | "
+            f"Dev F1={dev_f1*100:.2f}% | "
+            f"Best T={best_t:.2f}"
+        )
+
+        if dev_auc > best_auc_for_trial:
+            best_auc_for_trial = dev_auc
+
+        trial.report(dev_auc, epoch)
+
+        if trial.should_prune():
+            raise optuna.exceptions.TrialPruned()
+
+    del model
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    return best_auc_for_trial
+
+
+def update_config_file(best_lr, best_wd, best_batch, best_contrastive_weight):
+    config_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "core", "config.py")
+    )
+
+    if not os.path.exists(config_path):
+        print(f"❌ Không tìm thấy config.py tại: {config_path}")
+        return False
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    content = re.sub(
+        r"LEARNING_RATE\s*=\s*[\d\.e\-\+]+",
+        f"LEARNING_RATE = {best_lr:.4e}",
+        content
+    )
+
+    content = re.sub(
+        r"WEIGHT_DECAY\s*=\s*[\d\.e\-\+]+",
+        f"WEIGHT_DECAY = {best_wd:.4e}",
+        content
+    )
+
+    content = re.sub(
+        r"BATCH_SIZE\s*=\s*\d+",
+        f"BATCH_SIZE = {best_batch}",
+        content
+    )
+
+    content = re.sub(
+        r"IMAGE_SIZE\s*=\s*\d+",
+        "IMAGE_SIZE = 224",
+        content
+    )
+
+    content = re.sub(
+        r"MAX_FRAMES\s*=\s*\d+",
+        "MAX_FRAMES = 16",
+        content
+    )
+
+    content = re.sub(
+        r"CONTRASTIVE_WEIGHT\s*=\s*[\d\.e\-\+]+",
+        f"CONTRASTIVE_WEIGHT = {best_contrastive_weight:.4f}",
+        content
+    )
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    print("\n🎯 Đã cập nhật config.py:")
+    print("   -> IMAGE_SIZE = 224")
+    print("   -> MAX_FRAMES = 16")
+    print(f"   -> BATCH_SIZE = {best_batch}")
+    print(f"   -> LEARNING_RATE = {best_lr:.4e}")
+    print(f"   -> WEIGHT_DECAY = {best_wd:.4e}")
+    print(f"   -> CONTRASTIVE_WEIGHT = {best_contrastive_weight:.4f}")
+
+    return True
+
+
+def generate_report_and_charts(study, baseline_lr, baseline_wd):
+    config = MultimodalConfig()
+    best_params = study.best_params
+
+    data = {
+        "Chỉ số cấu hình": [
+            "Batch Size",
+            "Learning Rate",
+            "Weight Decay",
+            "Contrastive Weight",
+            "Best Dev AUC"
+        ],
+        "Baseline": [
+            str(config.BATCH_SIZE),
+            f"{baseline_lr:.2e}",
+            f"{baseline_wd:.2e}",
+            str(config.CONTRASTIVE_WEIGHT),
+            "Chưa tối ưu"
+        ],
+        "Tối ưu": [
+            str(best_params["batch_size"]),
+            f"{best_params['learning_rate']:.2e}",
+            f"{best_params['weight_decay']:.2e}",
+            f"{best_params['contrastive_weight']:.4f}",
+            f"{study.best_value:.4f}"
+        ]
+    }
+
+    df_report = pd.DataFrame(data)
+
+    report_path = os.path.join(
+        config.METADATA_DIR,
+        "fakeavceleb_hyperparameter_comparison.csv"
+    )
+
+    df_report.to_csv(report_path, index=False, encoding="utf-8-sig")
+
+    print("\n" + "=" * 80)
+    print("BẢNG SO SÁNH HYPERPARAMETER FAKEAVCELEB")
+    print("=" * 80)
+    print(df_report.to_string(index=False))
+    print(f"\n📄 Đã lưu report: {report_path}")
+
+    trials_df = study.trials_dataframe()
+
+    chart_path = os.path.join(
+        config.PROJECT_ROOT,
+        "fakeavceleb_hyperparameter_tuning_history.png"
+    )
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(
+        trials_df["number"],
+        trials_df["value"],
+        marker="o",
+        linestyle="-",
+        linewidth=2,
+        label="Dev AUC"
+    )
+
+    plt.axhline(
+        y=study.best_value,
+        linestyle="--",
+        label=f"Best Dev AUC: {study.best_value:.4f}"
+    )
+
+    plt.title("FakeAVCeleb Hyperparameter Tuning theo Dev AUC")
+    plt.xlabel("Trial")
+    plt.ylabel("Dev AUC")
+    plt.grid(True, linestyle=":", alpha=0.6)
+    plt.legend()
+    plt.savefig(chart_path, dpi=300, bbox_inches="tight")
+    plt.close()
+
+    print(f"📊 Đã lưu chart: {chart_path}")
+
+
+def main():
+    print("=== HYPERPARAMETER TUNING - FAKEAVCELEB ONLY ===")
+
+    config = MultimodalConfig()
+    config.create_required_dirs()
+
+    baseline_lr = config.LEARNING_RATE
+    baseline_wd = config.WEIGHT_DECAY
+
+    if not os.path.exists(config.FAKEAVCELEB_TRAIN_MANIFEST):
+        print(f"❌ Không tìm thấy train manifest: {config.FAKEAVCELEB_TRAIN_MANIFEST}")
+        print("Hãy chạy trước: python tools\\preprocess_fakeavceleb.py")
+        return
+
+    if not os.path.exists(config.FAKEAVCELEB_DEV_MANIFEST):
+        print(f"❌ Không tìm thấy dev manifest: {config.FAKEAVCELEB_DEV_MANIFEST}")
+        print("Hãy chạy trước: python tools\\preprocess_fakeavceleb.py")
+        return
+
+    df_train = pd.read_csv(config.FAKEAVCELEB_TRAIN_MANIFEST)
+    df_dev = pd.read_csv(config.FAKEAVCELEB_DEV_MANIFEST)
+
+    print(f"FakeAVCeleb Train manifest: {len(df_train)}")
+    print(f"FakeAVCeleb Dev manifest:   {len(df_dev)}")
+
+    print("\n📊 Train label:")
+    print(df_train["label"].value_counts())
+
+    print("\n📊 Dev label:")
+    print(df_dev["label"].value_counts())
+
+    # Tuning nhanh:
+    # Train: 100 real + 100 fake = 200 mẫu
+    # Dev:   50 real + 50 fake = 100 mẫu
+    df_subset_train = balanced_sample(df_train, n_per_class=100, seed=42)
+    df_subset_dev = balanced_sample(df_dev, n_per_class=50, seed=42)
+
+    temp_train_path = os.path.join(
+        config.METADATA_DIR,
+        "temp_fakeavceleb_tuning_train.csv"
+    )
+    temp_dev_path = os.path.join(
+        config.METADATA_DIR,
+        "temp_fakeavceleb_tuning_dev.csv"
+    )
+
+    df_subset_train.to_csv(temp_train_path, index=False)
+    df_subset_dev.to_csv(temp_dev_path, index=False)
+
+    print(f"\n✅ Tuning train subset: {len(df_subset_train)}")
+    print(df_subset_train["label"].value_counts())
+
+    print(f"\n✅ Tuning dev subset: {len(df_subset_dev)}")
+    print(df_subset_dev["label"].value_counts())
+
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=42),
+        pruner=optuna.pruners.MedianPruner(
+            n_startup_trials=3,
+            n_warmup_steps=1
+        )
+    )
+
+    print("\n🚀 Bắt đầu tuning FakeAVCeleb theo Dev AUC...")
+    print("Lần đầu nên để n_trials=5. Khi ổn có thể tăng 10 hoặc 15.")
+
+    study.optimize(objective, n_trials=5)
+
+    generate_report_and_charts(study, baseline_lr, baseline_wd)
+
+    best_lr = study.best_params["learning_rate"]
+    best_wd = study.best_params["weight_decay"]
+    best_batch = study.best_params["batch_size"]
+    best_contrastive_weight = study.best_params["contrastive_weight"]
+
+    print("\n🏆 Best Trial:")
+    print(f"   Dev AUC:            {study.best_value:.4f}")
+    print(f"   Batch Size:         {best_batch}")
+    print(f"   Learning Rate:      {best_lr:.4e}")
+    print(f"   Weight Decay:       {best_wd:.4e}")
+    print(f"   Contrastive Weight: {best_contrastive_weight:.4f}")
+
+    if update_config_file(
+        best_lr=best_lr,
+        best_wd=best_wd,
+        best_batch=best_batch,
+        best_contrastive_weight=best_contrastive_weight
+    ):
+        print("\n✅ Tuning xong. Bây giờ train chính thức bằng:")
+        print("python experiments\\train_fakeavceleb.py")
+
+        # Không tự động gọi train để tránh chạy nhầm quá lâu.
+        # Bạn tự chạy train sau khi kiểm tra best params.
+
+
+if __name__ == "__main__":
+    main()
