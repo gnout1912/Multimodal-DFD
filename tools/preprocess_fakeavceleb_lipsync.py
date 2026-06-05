@@ -341,7 +341,7 @@ def split_train_dev_test(df, label_col="label", seed=42):
 def process_split(split_name, split_df, processed_dir, config):
     print(f"\n🚀 Preprocess split: {split_name.upper()}")
 
-    split_dir = os.path.join(processed_dir, "FakeAVCeleb", split_name)
+    split_dir = os.path.join(processed_dir, "FakeAVCeleb_LipSync", split_name)
     os.makedirs(split_dir, exist_ok=True)
 
     manifest_rows = []
@@ -382,8 +382,8 @@ def process_split(split_name, split_df, processed_dir, config):
 
         if status == "success":
             manifest_rows.append({
-                "face_folder": f"FakeAVCeleb/{split_name}/{safe_name}",
-                "audio_path": f"FakeAVCeleb/{split_name}/{safe_name}.wav",
+                "face_folder": f"FakeAVCeleb_LipSync/{split_name}/{safe_name}",
+                "audio_path": f"FakeAVCeleb_LipSync/{split_name}/{safe_name}.wav",
                 "label": int(row["label"]),
                 "method": str(row.get("method", "")),
                 "type": str(row.get("type", "")),
@@ -431,6 +431,28 @@ def main():
     df["label"] = df["method"].apply(
         lambda x: 0 if str(x).strip().lower() == "real" else 1
     )
+
+    # ============================================================
+    # LIPSYNC-FOCUSED FILTER
+    # Real: method == real
+    # Fake: chỉ lấy các method có liên quan wav2lip
+    # ============================================================
+    df["method_lower"] = df["method"].astype(str).str.strip().str.lower()
+
+    real_df = df[df["method_lower"] == "real"].copy()
+
+    fake_df = df[
+        df["method_lower"].str.contains("wav2lip", na=False)
+    ].copy()
+
+    df = pd.concat([real_df, fake_df], axis=0)
+    df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+
+    print("\n🎯 Lipsync-focused filtering:")
+    print(df["method_lower"].value_counts())
+
+    print("\n📊 Label distribution sau khi lọc lipsync:")
+    print(df["label"].value_counts())
 
     print("\n📊 Phân bố label ban đầu trong metadata:")
     print(df["label"].value_counts())
@@ -493,7 +515,7 @@ def main():
     for split_name in ["train", "dev", "test"]:
         manifest_path = os.path.join(
             output_metadata_dir,
-            f"fakeavceleb_{split_name}_manifest.csv"
+            f"fakeavceleb_lipsync_{split_name}_manifest.csv"
         )
 
         out_df = pd.DataFrame(all_manifest_data[split_name])

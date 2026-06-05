@@ -36,7 +36,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from core.config import MultimodalConfig
+from core.config_lipsync_v2 import MultimodalConfig
 from core.dataset.data_loader import MultimodalDataset
 from core.models.multimodal_model import MultimodalDeepfakeDetector
 
@@ -62,26 +62,25 @@ def find_best_threshold(labels, probs):
     probs = np.array(probs)
 
     best_t = 0.5
-    best_bal_acc = 0.0
+    best_score = -1
     best_acc = 0.0
     best_f1 = 0.0
-    best_macro_f1 = 0.0
 
     for t in np.arange(0.10, 0.91, 0.01):
         preds = (probs >= t).astype(int)
 
         bal_acc = balanced_accuracy_score(labels, preds)
-        acc = accuracy_score(labels, preds)
-        f1 = f1_score(labels, preds, zero_division=0)
         macro_f1 = f1_score(labels, preds, average="macro", zero_division=0)
+        binary_f1 = f1_score(labels, preds, zero_division=0)
+        acc = accuracy_score(labels, preds)
 
-        # Ưu tiên balanced accuracy để không bị lệch về fake
-        if bal_acc > best_bal_acc:
-            best_bal_acc = bal_acc
-            best_acc = acc
-            best_f1 = f1
-            best_macro_f1 = macro_f1
+        score = 0.5 * bal_acc + 0.5 * macro_f1
+
+        if score > best_score:
+            best_score = score
             best_t = float(t)
+            best_acc = acc
+            best_f1 = binary_f1
 
     return best_t, best_f1, best_acc
 

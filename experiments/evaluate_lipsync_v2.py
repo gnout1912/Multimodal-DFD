@@ -4,6 +4,7 @@ import json
 import torch
 import torch.nn as nn
 import numpy as np
+import pandas as pd
 from tqdm import tqdm
 from sklearn.metrics import (
     accuracy_score,
@@ -14,7 +15,7 @@ from sklearn.metrics import (
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from core.config import MultimodalConfig
+from core.config_lipsync_v2 import MultimodalConfig
 from core.dataset.data_loader import MultimodalDataset
 from core.models.multimodal_model import MultimodalDeepfakeDetector
 
@@ -150,6 +151,84 @@ def evaluate_model(model, loader, device, config, threshold):
         "preds": all_preds,
     }
 
+def save_error_analysis(config, results, threshold):
+    """
+    Lưu chi tiết từng sample trong test set:
+    - label thật
+    - xác suất model dự đoán
+    - pred
+    - đúng/sai
+    - method/type/category/source_path nếu manifest có
+    """
+
+    manifest_df = pd.read_csv(config.TEST_MANIFEST).reset_index(drop=True)
+
+    # Ép kiểu rõ ràng để tránh lỗi pandas float16 indexes are not supported
+    probs = np.array(results["probs"], dtype=np.float32)
+    preds = np.array(results["preds"], dtype=np.int64)
+    labels = np.array(results["labels"], dtype=np.int64)
+
+    if len(manifest_df) != len(labels):
+        print("⚠️ Số dòng manifest không khớp số prediction.")
+        print(f"Manifest: {len(manifest_df)} | Predictions: {len(labels)}")
+        return
+
+    manifest_df["true_label"] = labels.astype(int)
+    manifest_df["pred_label"] = preds.astype(int)
+    manifest_df["prob_fake"] = probs.astype(float)
+    manifest_df["threshold"] = float(threshold)
+    manifest_df["is_correct"] = manifest_df["true_label"] == manifest_df["pred_label"]
+
+    def get_error_type(row):
+        if row["is_correct"]:
+            return "correct"
+
+        if row["true_label"] == 0 and row["pred_label"] == 1:
+            return "false_fake_real_predicted_fake"
+
+        if row["true_label"] == 1 and row["pred_label"] == 0:
+            return "false_real_fake_predicted_real"
+
+        return "unknown_error"
+
+    manifest_df["error_type"] = manifest_df.apply(get_error_type, axis=1)
+
+    # Tạo cột phụ để sort: sample sai lên trước
+    manifest_df["correct_sort"] = manifest_df["is_correct"].astype(int)
+
+    manifest_df = manifest_df.sort_values(
+        by=["correct_sort", "error_type", "prob_fake"],
+        ascending=[True, True, False]
+    ).reset_index(drop=True)
+
+    # Xóa cột phụ cho sạch file
+    manifest_df = manifest_df.drop(columns=["correct_sort"])
+
+    output_path = os.path.join(
+        config.METADATA_DIR,
+        config.ERROR_ANALYSIS_NAME
+    )
+
+    manifest_df.to_csv(output_path, index=False, encoding="utf-8-sig")
+
+    print(f"\n✅ Saved error analysis CSV: {output_path}")
+
+    error_df = manifest_df[manifest_df["is_correct"] == False]
+
+    print("\n📌 Error summary:")
+    print(error_df["error_type"].value_counts())
+
+    if "method" in error_df.columns:
+        print("\n📌 Error by method:")
+        print(error_df["method"].value_counts())
+
+    if "type" in error_df.columns:
+        print("\n📌 Error by type:")
+        print(error_df["type"].value_counts())
+
+    if "category" in error_df.columns:
+        print("\n📌 Error by category:")
+        print(error_df["category"].value_counts())
 
 def main():
     print("=== EVALUATE FAKEAVCELEB ONLY - GIẢI PHÁP 1 ===")
@@ -231,9 +310,8 @@ def main():
 
     result_path = os.path.join(
         config.METADATA_DIR,
-        "fakeavceleb_test_results.json"
+        config.TEST_RESULT_NAME
     )
-
     save_data = {
         "loss": float(results["loss"]),
         "accuracy": float(results["accuracy"]),
@@ -250,6 +328,11 @@ def main():
 
     print(f"\n✅ Saved test result: {result_path}")
 
+    save_error_analysis(
+        config=config,
+        results=results,
+        threshold=threshold
+    )
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,10 @@
+﻿Chỉ số,Giá trị
+Best Objective Score,0.7726
+Best Dev AUC,0.7885
+Max Frames,20
+Batch Size,2
+Learning Rate,3.9126e-05
+Weight Decay,1.9957e-04
+Contrastive Weight,0.0625
+Trials,15
+Epochs per Trial,4
