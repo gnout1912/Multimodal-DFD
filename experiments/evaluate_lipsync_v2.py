@@ -236,7 +236,12 @@ def main():
     config = MultimodalConfig()
     config.create_required_dirs()
 
+    config.BEST_MODEL_NAME = f"best_fakeavceleb_lipsync_v2_seed{config.SEED}_model.pth"
+    config.BEST_THRESHOLD_NAME = f"best_fakeavceleb_lipsync_v2_seed{config.SEED}_threshold.json"
+    config.TEST_RESULT_NAME = f"fakeavceleb_lipsync_v2_seed{config.SEED}_test_results.json"
+    config.ERROR_ANALYSIS_NAME = f"fakeavceleb_lipsync_v2_seed{config.SEED}_error_analysis.csv"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     print(f"-> Device: {device}")
 
     best_model_path = os.path.join(config.WEIGHTS_DIR, config.BEST_MODEL_NAME)

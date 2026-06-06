@@ -30,6 +30,7 @@ import torch.nn as nn
 import torch.optim as optim
 import pandas as pd
 import numpy as np
+import random
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score, f1_score, accuracy_score
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -225,12 +226,30 @@ def save_threshold(config, threshold, dev_auc, dev_f1, dev_acc):
 
     print(f"✅ Saved best threshold: {threshold_path}")
 
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
+    print(f"✅ Using random seed: {seed}")
 
 def main():
     print("=== TRAIN FAKEAVCELEB ONLY - GIẢI PHÁP 1 ===")
 
     config = MultimodalConfig()
     config.create_required_dirs()
+    set_seed(config.SEED)
+
+    config.BEST_MODEL_NAME = f"best_fakeavceleb_lipsync_v2_seed{config.SEED}_model.pth"
+    config.BEST_THRESHOLD_NAME = f"best_fakeavceleb_lipsync_v2_seed{config.SEED}_threshold.json"
+    config.HISTORY_NAME = f"fakeavceleb_lipsync_v2_seed{config.SEED}_training_history.csv"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"-> Device: {device}")

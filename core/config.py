@@ -12,7 +12,7 @@ class MultimodalConfig:
     METADATA_DIR = os.path.join(PROJECT_ROOT, "data", "metadata")
 
     # =========================================================================
-    # FAKEAVCELEB LIPSYNC-FOCUSED V2
+    # FAKEAVCELEB LIPSYNC V1 DEFAULT CONFIG
     # =========================================================================
     FAKEAVCELEB_RAW_DIR = r"D:\Projects\FakeAVCeleb_v1.2"
     FAKEAVCELEB_METADATA_CSV = os.path.join(METADATA_DIR, "fakeavceleb_meta_data.csv")
@@ -36,23 +36,23 @@ class MultimodalConfig:
     TARGET_AUDIO_LEN = AUDIO_SR * AUDIO_DURATION
 
     # =========================================================================
-    # TRAIN CONFIG - V2
+    # TRAINING CONFIG
     # =========================================================================
     BATCH_SIZE = 4
     EPOCHS = 25
 
-    SEED = 999
-
-    LEARNING_RATE = 3e-5
-    WEIGHT_DECAY = 2e-4
+    LEARNING_RATE = 4.46e-5
+    WEIGHT_DECAY = 1e-4
     NUM_WORKERS = 0
 
-    CONTRASTIVE_WEIGHT = 0.04
+    CONTRASTIVE_WEIGHT = 0.03
     GRAD_CLIP_NORM = 1.0
     EARLY_STOPPING_PATIENCE = 6
 
+    SEED = 999
+
     # =========================================================================
-    # MODEL
+    # MODEL CONFIG
     # =========================================================================
     WAV2VEC_MODEL_NAME = "facebook/wav2vec2-base-960h"
     EFFICIENTNET_MODEL_NAME = "efficientnet_b3"
@@ -62,14 +62,14 @@ class MultimodalConfig:
     DIM_SHARED = 512
 
     # =========================================================================
-    # OUTPUT FILES - KHÔNG ĐÈ V1
+    # OUTPUT FILES V1
     # =========================================================================
-    BEST_MODEL_NAME = "best_fakeavceleb_lipsync_v2_model.pth"
-    BEST_THRESHOLD_NAME = "best_fakeavceleb_lipsync_v2_threshold.json"
-    HISTORY_NAME = "fakeavceleb_lipsync_v2_training_history.csv"
+    BEST_MODEL_NAME = "best_fakeavceleb_lipsync_model.pth"
+    BEST_THRESHOLD_NAME = "best_fakeavceleb_lipsync_threshold.json"
+    HISTORY_NAME = "fakeavceleb_lipsync_training_history.csv"
 
-    TEST_RESULT_NAME = "fakeavceleb_lipsync_v2_test_results.json"
-    ERROR_ANALYSIS_NAME = "fakeavceleb_lipsync_v2_error_analysis.csv"
+    TEST_RESULT_NAME = "fakeavceleb_lipsync_test_results.json"
+    ERROR_ANALYSIS_NAME = "fakeavceleb_lipsync_error_analysis.csv"
 
     @classmethod
     def create_required_dirs(cls):
